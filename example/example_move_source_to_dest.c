@@ -1,8 +1,8 @@
-#define STAG_USER_COMMANDS(X) \
-	X(MOVE,     "--move",    "-m", "the file to be moved", "",  true, '=') \
-	X(TO,       "--to",      "-t", "the destination the file will be moved to", "",  true, '=') \
-	X(DRY,      "--dry-run", "-d", "test output, no execution", "",  false, 0) \
-	X(VERBOSE,  "--verbose", "-v", "verbose", "",  false, 0)
+#define STAG_USER_COMMANDS(ENTRY) \
+	ENTRY(MOVE,     "--move",    "-m", "the file to be moved", "",  true, '=') \
+	ENTRY(TO,       "--to",      "-t", "the destination the file will be moved to", "",  true, '=') \
+	ENTRY(DRY,      "--dry-run", "-d", "test output, no execution", "",  false, 0) \
+	ENTRY(VERBOSE,  "--verbose", "-v", "verbose", "",  false, 0)
 
 #include "stormc_argument_parser.h"
 
