@@ -4,7 +4,7 @@
 	ENTRY(DRY,      "--dry-run", "-d", "test output, no execution", "",  false, 0) \
 	ENTRY(VERBOSE,  "--verbose", "-v", "verbose", "",  false, 0)
 
-#include "stormc_argument_parser.h"
+#include "../stormc_argument_parser.h"
 
 int main(int argc, char **argv)
 {

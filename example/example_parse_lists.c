@@ -4,9 +4,7 @@
 	ENTRY(UNSIGNED, "--unsigned", "-us", "list of integers separated by user-picked delimiter", "", true, '=')\
 	ENTRY(SIGNED, "--signed", "-si", "list of integers separated by user-picked delimiter", "", true, '=')\
 
-#include "stormc_argument_parser.h"
-
-
+#include "../stormc_argument_parser.h"
 
 
 int main(int argc, char **argv)

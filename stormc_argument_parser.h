@@ -16,15 +16,119 @@ typedef stag_u16	stag_bool16;
 typedef stag_u32	stag_bool32;
 typedef stag_u64	stag_bool64;
 
+#ifndef true
+#define true 1
+#endif
+
+#ifndef false
+#define false 0
+#endif
+
+
+#define STAG_STR(x) (struct stag_string){.str = (x), .len = sizeof((x)) - 1}
+// #define STAG_REMOVE_PREFIX
+
+#ifdef STAG_STRIP_PREFIX
+#define string (struct stag_string)
+#define ctx (struct stag_ctx)
+#define layout (struct stag_layout)
+
+
+#define bool8  stag_bool8
+#define bool16 stag_bool16
+#define bool32 stag_bool32
+#define bool64 stag_bool64
+
+#define u8 stag_u8
+#define u16 stag_u16
+#define u32 stag_u32
+#define u64 stag_u64
+
+#define i8  stag_i8
+#define i16 stag_i16
+#define i32 stag_i32
+#define i64 stag_i64
+
+
+#define f32 stag_f32
+#define f64 stag_f64
+#endif
+
+
+
+struct stag_string{
+	char	*str;
+	stag_u64 len;
+};
+
+
+struct stag_layout{
+	struct stag_string	cmd_name;
+	struct stag_string	cmd_short;
+	struct stag_string	cmd_description;
+	struct stag_string	arg_missing_err_msg;
+	stag_bool64		takes_args;
+	char			arg_delimiter;
+};
+
+#ifndef STAG_USER_COMMANDS
+#error "Define STAG_USER_COMMANDS with a list of commands"
+#endif
+#define STAG_ENUM_ENTRY(name, ...) name,
+enum stag_user_commands{
+	NIL,
+	STAG_HELP,
+	STAG_USER_COMMANDS(STAG_ENUM_ENTRY)
+#undef STAG_ENUM_ENTRY
+	USER_COMMANDS_COUNT
+};
+
+#define STAG_TABLE_ENTRY(_enum, _cmd_name, _cmd_short, _cmd_desc, _err_msg_missing_arg, _takes_args, _arg_delim, ...) \
+	[(_enum)] = {(STAG_STR(_cmd_name)), (STAG_STR(_cmd_short)), (STAG_STR(_cmd_desc)), (STAG_STR(_err_msg_missing_arg)), (_takes_args), (_arg_delim)},
+
+const struct stag_layout stag_table[] = {
+	[NIL] = {STAG_STR(""), STAG_STR(""), false},
+	[STAG_HELP] = {STAG_STR("--help"), STAG_STR("-h")},
+	STAG_USER_COMMANDS(STAG_TABLE_ENTRY)
+#undef STAG_TABLE_ENTRY
+};
+
+
+struct stag_cmd_array{
+	enum stag_user_commands		cmd;
+	struct stag_string		args;
+
+};
+
+struct stag_ctx{
+	struct stc_stack	*scratch;
+	int			argc;
+	char			**argv;
+
+
+	struct stag_cmd_array		*cmd_array;
+	stag_u64			cmd_array_len;
+	stag_u64			cmd_array_dispatch_ct;
+	stag_u64			cmtd;
+	const struct stag_layout	*user_data;
+};
+
+
+/*FUNC DEFS*/
 static stag_bool32 is_prime(stag_u64 n);
 static stag_u64 next_prime(stag_u64 n);
 static stag_bool32 is_pow2(stag_u64 n);
 static stag_u64 next_pow2(stag_u64 n);
-
-
-#ifndef STAG_MAX_RESERVATION
-#define STAG_MAX_RESERVATION (1llu << 30)
-#endif
+static void stag_parse(void);
+struct stag_string stag_strip_arg_upto_delim(struct stag_string string, char delim);
+static void stag_run(int argc, char **argv);
+static stag_bool32 stag_strcmp(struct stag_string a, struct stag_string b);
+static void stag_cmd_array_append(struct stag_cmd_array cmd);
+struct stag_array_string stag_string_to_array_of_strings(struct stag_string input, char delim);
+static stag_f64 stag_string_to_float(struct stag_string *string);
+static stag_i64 stag_string_to_i64(struct stag_string *string);
+static stag_u64 stag_string_to_u64(struct stag_string *string);
+struct stag_string stag_strip_arg_at_delim(char *string, char delim); /*UNUSED*/
 
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -33,13 +137,20 @@ static stag_u64 next_pow2(stag_u64 n);
 #include <stdlib.h>
 #include <stdio.h>
 
-
 /*============================================*/
 /*@ALLOCATOR*/
 #define MAX_UINT64 (stag_u64)(-1)
 #include <stddef.h>
 
 
+#define stc_stack_start(stack)\
+	stack->checkpoint_offset = stack->base_offset
+
+#define stc_stack_end(stack)\
+	stack->base_offset = stack->checkpoint_offset
+
+#define stc_stack_push(__stack, __type, __count)\
+	_stc_stack_push((__stack), __alignof__(__type), (sizeof(__type) * (__count)))
 
 #define stc_byte char
 #define STC_ALIGN_UP(x, align) (((x) + ((align)-1)) & ~((align)-1))
@@ -67,6 +178,7 @@ void *stc_os_mem_cmt(void* addrs, stag_u64 size)
 #else
 #include <sys/mman.h>
 
+
 void *stc_os_alloc_default(stag_u64 size)
 {
 	return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1 , 0);
@@ -93,6 +205,15 @@ void *stc_os_mem_cmt(void* addrs, stag_u64 size)
 #endif
 
 
+#ifndef STAG_MAX_RESERVATION
+#define STAG_MAX_RESERVATION (1llu << 30)
+#endif
+
+
+
+
+
+
 #define MAX_FREE_LIST_ELEMENTS 65535
 struct free_list {
 	void		*ptr[MAX_FREE_LIST_ELEMENTS];
@@ -100,7 +221,6 @@ struct free_list {
 	stag_u64	ct_ptrs;
 };
 
-//@STACK STC RUNTIME
 struct stc_stack {
 	struct free_list	free_list;
 	stag_u64		mem_rsrv;
@@ -110,6 +230,9 @@ struct stc_stack {
 	stc_byte		*base;
 };
 #define STACK_HEADER_SIZE sizeof(struct stc_stack)
+
+
+
 
 struct stc_stack *stc_stack_gen(stag_u64 rsrv)
 {
@@ -230,124 +353,26 @@ void stack_end(struct stc_stack *s)
 /*============================================*/
 
 
-#ifndef true
-#define true 1
-#endif
-
-#ifndef false
-#define false 0
-#endif
-
-#define STAG_STR(x) (struct stag_string){.str = (x), .len = sizeof((x)) - 1}
-
-// #define STAG_REMOVE_PREFIX
-
-#ifdef STAG_STRIP_PREFIX
-#define string (struct stag_string)
-#define ctx (struct stag_ctx)
-#define layout (struct stag_layout)
-
-
-#define bool8  stag_bool8
-#define bool16 stag_bool16
-#define bool32 stag_bool32
-#define bool64 stag_bool64
-
-#define u8 stag_u8
-#define u16 stag_u16
-#define u32 stag_u32
-#define u64 stag_u64
-
-#define i8  stag_i8
-#define i16 stag_i16
-#define i32 stag_i32
-#define i64 stag_i64
-
-
-#define f32 stag_f32
-#define f64 stag_f64
-#endif
-
-
-struct stag_string{
-	char	*str;
-	stag_u64 len;
-};
-
-
-struct stag_layout{
-	struct stag_string	cmd_name;
-	struct stag_string	cmd_short;
-	struct stag_string	cmd_description;
-	struct stag_string	arg_missing_err_msg;
-	stag_bool64		takes_args;
-	char			arg_delimiter;
-};
 
 
 
-#ifndef STAG_USER_COMMANDS
-#error "Define STAG_USER_COMMANDS with a list of commands"
-#endif
-#define STAG_ENUM_ENTRY(name, ...) name,
-enum stag_user_commands{
-	NIL,
-	STAG_HELP,
-	STAG_USER_COMMANDS(STAG_ENUM_ENTRY)
-#undef STAG_ENUM_ENTRY
-	USER_COMMANDS_COUNT
-};
-
-#define STAG_TABLE_ENTRY(_enum, _cmd_name, _cmd_short, _cmd_desc, _err_msg_missing_arg, _takes_args, _arg_delim, ...) \
-	[(_enum)] = {(STAG_STR(_cmd_name)), (STAG_STR(_cmd_short)), (STAG_STR(_cmd_desc)), (STAG_STR(_err_msg_missing_arg)), (_takes_args), (_arg_delim)},
-
-const struct stag_layout stag_table[] = {
-	[NIL] = {STAG_STR(""), STAG_STR(""), false},
-	[STAG_HELP] = {STAG_STR("--help"), STAG_STR("-h")},
-	STAG_USER_COMMANDS(STAG_TABLE_ENTRY)
-#undef STAG_TABLE_ENTRY
-};
 
 
 
-struct stag_cmd_array{
-	enum stag_user_commands		cmd;
-	struct stag_string		args;
-
-};
-
-struct stag_ctx{
-	int		argc;
-	char		**argv;
 
 
-	struct stag_cmd_array		*cmd_array;
-	stag_u64			cmd_array_len;
-	stag_u64			cmd_array_dispatch_ct;
-	stag_u64			cmtd;
-	const struct stag_layout	*user_data;
-};
+
+
 
 
 static struct stag_ctx stag_ctx = {0};
 
 
 
-/*FUNC DEFS*/
-void stag_parse(void);
-struct stag_string stag_strip_arg_upto_delim(struct stag_string string, char delim);
-void stag_run(int argc, char **argv);
-stag_bool32 stag_strcmp(struct stag_string a, struct stag_string b);
-void stag_cmd_array_append(struct stag_cmd_array cmd);
-struct stag_string_array stag_string_to_array_of_strings(struct stag_string input, char delim);
-static stag_f64 stag_string_to_float(struct stag_string *string);
-static stag_i64 stag_string_to_i64(struct stag_string *string);
-static stag_u64 stag_string_to_u64(struct stag_string *string);
-struct stag_string stag_strip_arg_at_delim(char *string, char delim); /*UNUSED*/
 
 
 
-stag_u64 stag_string_to_stag_u64(struct stag_string *string)
+stag_u64 stag_string_to_u64(struct stag_string *string)
 {
 	stag_u64 pl = 0;
 	for (char *start = (char*)string->str, *end = (char*)string->str + string->len; start!= end; ++start) {
@@ -358,7 +383,7 @@ stag_u64 stag_string_to_stag_u64(struct stag_string *string)
 }
 
 
-stag_i64 stag_string_to_stag_i64(struct stag_string *string)
+stag_i64 stag_string_to_i64(struct stag_string *string)
 {
 	stag_i64 pl = 0;
 	stag_bool32 is_negative = string->str[0] == '-';
@@ -407,14 +432,33 @@ stag_f64 stag_string_to_float(struct stag_string *string)
 }
 
 
+stag_bool32 stag_check_cmd_exists(struct stag_string target)
+{
+	for (stag_u64 i = 2; i < USER_COMMANDS_COUNT; ++i) {
+		struct stag_string name_long = stag_ctx.user_data[i].cmd_name;
+		struct stag_string name_short = stag_ctx.user_data[i].cmd_short;
+		stag_bool32 is_name_long = stag_strcmp(target, name_long);
+		stag_bool32 is_name_short = stag_strcmp(target, name_short);
+		if (is_name_long || is_name_short) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void stag_parse(void)
 {
 	char **start = stag_ctx.argv + 1;
 	char **end = stag_ctx.argv + stag_ctx.argc;
 
+	if (*start == NULL) {
+		printf("err\n");
+		exit(1);
+	}
+
 	int ct = 0;
 
-	struct stag_string *input = (struct stag_string*)stc_os_alloc_default(sizeof(struct stag_string) * stag_ctx.argc);
+	struct stag_string *input = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, stag_ctx.argc);
 	stag_u64 input_len = 0;
 
 
@@ -429,10 +473,11 @@ void stag_parse(void)
 	stag_u64 idx = 0;
 	while (idx < input_len) {
 		for (stag_u64 i = 2; i < USER_COMMANDS_COUNT; ++i) {
-			struct stag_cmd_array current = {0};
-			current.cmd = i;
+			struct stag_cmd_array current = {};
+			current.cmd = (enum stag_user_commands)i;
 			struct stag_string cmd = {0};
 			stag_bool32 has_args = stag_ctx.user_data[i].takes_args;
+
 
 			if (stag_strcmp(input[idx], STAG_STR("--help")) || stag_strcmp(input[idx], STAG_STR("-h"))) {
 				printf("Available commands:\n");
@@ -443,6 +488,12 @@ void stag_parse(void)
 					       stag_ctx.user_data[j].cmd_description.str
 					);
 				}
+				exit(1);
+			}
+
+			stag_bool32 cmd_exists = stag_check_cmd_exists(stag_strip_arg_upto_delim((input[idx]), '='));
+			if (!cmd_exists) {
+				printf("Command '%.*s' does not exist\nUse '--help' to view commands\n", (int)input[idx].len, input[idx].str);
 				exit(1);
 			}
 
@@ -493,13 +544,17 @@ void stag_parse(void)
 	stag_cmd_array_append((struct stag_cmd_array){.cmd = NIL});
 }
 
+
+
+/*@RUN*/
 void stag_run(int argc, char **argv)
 {
 
+	stag_ctx.scratch = stc_stack_gen(STAG_MAX_RESERVATION);
 	stag_ctx.user_data = stag_table;
 	stag_ctx.argc = argc;
 	stag_ctx.argv = argv;
-	stag_ctx.cmd_array = stc_os_mem_rsrv(STAG_MAX_RESERVATION);
+	stag_ctx.cmd_array = (struct stag_cmd_array*)stc_os_mem_rsrv(STAG_MAX_RESERVATION);
 	int initial_size = STC_ALIGN_UP(sizeof(*stag_ctx.cmd_array), PAGESIZE);
 	stag_ctx.cmtd = initial_size;
 	stc_os_mem_cmt(stag_ctx.cmd_array, initial_size);
@@ -575,38 +630,95 @@ stag_bool32 stag_strcmp(struct stag_string a, struct stag_string b)
 }
 
 
-
-
-
-
-struct stag_string_array{
+struct stag_array_string{
 	struct stag_string	*strings;
 	stag_u64		len;
 };
 
 
-struct stag_float_array{
+struct stag_array_float{
 	stag_f64		*values;
-	stag_u64	len;
+	stag_u64		len;
 };
 
-struct stag_float_array_u{
+struct stag_array_unsigned{
 	stag_u64		*values;
-	stag_u64	len;
+	stag_u64		len;
 };
 
-struct stag_float_array_s{
+struct stag_array_signed{
 	stag_i64		*values;
-	stag_u64	len;
+	stag_u64		len;
 };
 
 
 
-struct stag_float_array stag_string_to_array_of_floats(struct stag_string input, char delim)
+struct stag_array_signed stag_string_to_array_of_signed(struct stag_string input, char delim)
 {
-	struct stag_float_array pl = {0};
+	struct stag_array_signed pl = {0};
 
-	pl.values = (stag_f64*)stc_os_alloc_default(sizeof(stag_f64) * 1024);
+	pl.values = (stag_i64 *)stc_stack_push(stag_ctx.scratch, stag_i64, input.len);
+	stag_u64 idx = 0;
+	stag_u64 inner_offset = 0;
+	while (idx < input.len) {
+		if (input.str[idx] == delim) {
+			struct stag_string string;
+			string.str = (input.str + idx) - inner_offset;
+			string.len = inner_offset;
+			pl.values[pl.len] = stag_string_to_i64(&string);
+			pl.len++;
+			inner_offset = 0;
+		} else {
+			inner_offset++;
+		}
+		++idx;
+	}
+	struct stag_string string;
+	string.str = (input.str + idx) - inner_offset;
+	string.len = inner_offset;
+	pl.values[pl.len] = stag_string_to_i64(&string);
+	pl.len++;
+
+
+	return pl;
+}
+
+
+struct stag_array_unsigned stag_string_to_array_of_unsigned(struct stag_string input, char delim)
+{
+	struct stag_array_unsigned pl = {0};
+
+	pl.values = (stag_u64 *)stc_stack_push(stag_ctx.scratch, stag_u64, input.len);
+	stag_u64 idx = 0;
+	stag_u64 inner_offset = 0;
+	while (idx < input.len) {
+		if (input.str[idx] == delim) {
+			struct stag_string string;
+			string.str = (input.str + idx) - inner_offset;
+			string.len = inner_offset;
+			pl.values[pl.len] = stag_string_to_u64(&string);
+			pl.len++;
+			inner_offset = 0;
+		} else {
+			inner_offset++;
+		}
+		++idx;
+	}
+	struct stag_string string;
+	string.str = (input.str + idx) - inner_offset;
+	string.len = inner_offset;
+	pl.values[pl.len] = stag_string_to_u64(&string);
+	pl.len++;
+
+
+	return pl;
+}
+
+struct stag_array_float stag_string_to_array_of_floats(struct stag_string input, char delim)
+{
+	struct stag_array_float pl = {0};
+
+	pl.values = (stag_f64 *)stc_stack_push(stag_ctx.scratch, stag_f64, input.len);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -633,10 +745,10 @@ struct stag_float_array stag_string_to_array_of_floats(struct stag_string input,
 }
 
 
-struct stag_string_array stag_string_to_array_of_strings(struct stag_string input, char delim)
+struct stag_array_string stag_string_to_array_of_strings(struct stag_string input, char delim)
 {
-	struct stag_string_array pl = {0};
-	pl.strings = stc_os_alloc_default(sizeof(struct stag_string) * 1024);
+	struct stag_array_string pl = {0};
+	pl.strings = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, input.len);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -660,18 +772,18 @@ struct stag_string_array stag_string_to_array_of_strings(struct stag_string inpu
 
 
 stag_bool32 is_prime(stag_u64 n) {
-    if (n < 2) return false;
-    if ((n & 1) == 0) return n == 2;
-    for (stag_u64 i = 3; i * i <= n; i += 2)
-        if (n % i == 0) return false;
-    return (stag_bool32)true;
+	if (n < 2) return false;
+	if ((n & 1) == 0) return n == 2;
+	for (stag_u64 i = 3; i * i <= n; i += 2)
+		if (n % i == 0) return false;
+	return (stag_bool32)true;
 }
 
 stag_u64 next_prime(stag_u64 n) {
-    if (n <= 2) return 2;
-    if ((n & 1) == 0) n++;
-    while (!is_prime(n)) n += 2;
-    return n;
+	if (n <= 2) return 2;
+	if ((n & 1) == 0) n++;
+	while (!is_prime(n)) n += 2;
+	return n;
 }
 
 stag_bool32 is_pow2(stag_u64 n)
