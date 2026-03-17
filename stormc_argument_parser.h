@@ -1,3 +1,5 @@
+#include <assert.h>
+
 typedef float	stag_f32;
 typedef double	stag_f64;
 
@@ -128,7 +130,7 @@ struct stag_array_string stag_string_to_array_of_strings(struct stag_string inpu
 static stag_f64 stag_string_to_float(struct stag_string *string);
 static stag_i64 stag_string_to_i64(struct stag_string *string);
 static stag_u64 stag_string_to_u64(struct stag_string *string);
-struct stag_string stag_strip_arg_at_delim(char *string, char delim); /*UNUSED*/
+struct stag_string stag_strip_arg_at_delim(struct stag_string string, char delim); /*UNUSED*/
 
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -211,14 +213,50 @@ void *stc_os_mem_cmt(void* addrs, stag_u64 size)
 
 
 
+#define ILT_GROUPS_COUNT 64ULL
+#define ILT_ML0_CT (ILT_GROUPS_COUNT * ILT_GROUPS_COUNT)
+#define ILT_TOTAL_INDICES (ILT_ML0_CT * 64ULL)
+#define ILT_NIL_REAL_IDX (~0ULL)
+
+
+struct stc_ilt{
+	stag_u64	ml0[ILT_ML0_CT];
+	stag_u64	ml0_count;
+	stag_u64	ml1[ILT_GROUPS_COUNT];
+	stag_u64	ml1_count;
+	stag_u64	ml2;
+	stag_u64	used_count;
+	stag_u64	max;
+};
 
 
 
-#define MAX_FREE_LIST_ELEMENTS 65535
+struct ilt_ctx_frame{
+	stag_u64	ml1_idx;
+	stag_u64	ml1_group;
+	stag_u64	ml0_idx;
+	stag_u64	ml0_bit;
+};
+
+static stag_u64 ilt_next_idx(struct stc_ilt *ilt);
+static stag_u64 ilt_top_idx(struct stc_ilt *ilt);
+static stag_bool32 ilt_is_empty(struct stc_ilt *ilt);
+static stag_bool32 ilt_is_full(struct stc_ilt *ilt);
+static stag_u64 ilt_get_ml0_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups);
+static stag_u64 ilt_get_real_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups, stag_u64 ml0_bit_offset);
+static void ilt_set_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group);
+static void ilt_unset_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group);
+static void ilt_count_inc(struct stc_ilt *ilt);
+static void ilt_count_dec(struct stc_ilt *ilt);
+static struct ilt_ctx_frame ilt_get_ctx_frame(struct stc_ilt *ilt);
+
+
+
+
 struct free_list {
-	void		*ptr[MAX_FREE_LIST_ELEMENTS];
-	stag_u64	size[MAX_FREE_LIST_ELEMENTS];
-	stag_u64	ct_ptrs;
+	struct stc_ilt	ilt;
+	stag_u64		*ptr;
+	stag_u64		*size;
 };
 
 struct stc_stack {
@@ -269,50 +307,62 @@ void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_si
 
 	stag_u64 start_old = (stag_u64)s->base + s->base_offset;
 	stag_u64 start_new = STC_ALIGN_UP(start_old, alignment);
-	stag_u64 end_new = STC_ALIGN_UP(start_new + total_size, alignment);
-	stag_u64 delta_offset = end_new - (stag_u64)s->base;
+	stag_u64 end_new = start_new + total_size;
+	stag_u64 size_new = end_new - (stag_u64)s->base;
 
 
-	if (s->free_list.ct_ptrs > 0 && s->free_list.ct_ptrs < MAX_FREE_LIST_ELEMENTS) {
-		void *return_ptr = NULL;
-		stag_u64 found_idx = 0;
-		stag_u64 smallest_fit_size = MAX_UINT64;
-		for (stag_u64 i = 0; i < s->free_list.ct_ptrs; ++i) {
-			stag_u64 ptr_base_aligned = STC_ALIGN_UP((stag_u64)s->free_list.ptr[i], alignment);
-			stag_u64 ptr_aligned_dist_relative_to_base_pointer = ptr_base_aligned - (stag_u64)s->free_list.ptr[i];
-			stag_u64 size_after_aligning = s->free_list.size[i] - ptr_aligned_dist_relative_to_base_pointer;
-			if (smallest_fit_size >= size_after_aligning && size_after_aligning >= total_size) {
-				smallest_fit_size = size_after_aligning;
-				return_ptr = (void*)ptr_base_aligned;
-				found_idx = i;
+	if (!ilt_is_empty(&s->free_list.ilt)) {
+		stag_u64 smallest_fit = MAX_UINT64;
+		stag_u64 smallest_fit_position = MAX_UINT64;
+		for (stag_u64 ml1_indx = 0; ml1_indx < 64; ++ml1_indx) {
+			for (stag_u64 ml1_group = 0; ml1_group < 64; ++ml1_group) {
+				stag_u64 ml0_idx = ilt_get_ml0_idx((stag_u64)ml1_indx, ml1_group);
+
+				if (s->free_list.ilt.ml0[ml0_idx] != 0) {
+					int bit_idx = 0;
+					while (bit_idx < 64) {
+						if (!(s->free_list.ilt.ml0[ml0_idx] & (1llu << bit_idx))) {
+							++bit_idx;
+							continue;
+						}
+						stag_u64 real_idx = ilt_get_real_idx(ml1_indx, ml1_group, (stag_u64)bit_idx);
+						if (((stag_u64)(s->free_list.ptr[real_idx] & (alignment - 1)) == 0)) {
+							if (s->free_list.size[real_idx] < smallest_fit && s->free_list.size[real_idx] >= total_size) {
+								smallest_fit = s->free_list.size[real_idx];
+								smallest_fit_position = real_idx;
+							}
+						}
+						++bit_idx;
+					}
+				}
 			}
 		}
 
-		if (return_ptr != NULL) {
-			void *temp_ptr = s->free_list.ptr[s->free_list.ct_ptrs - 1];
-			s->free_list.ptr[s->free_list.ct_ptrs - 1] = s->free_list.ptr[found_idx];
-			s->free_list.ptr[found_idx] = temp_ptr;
-
-			stag_u64 temp_size = s->free_list.size[s->free_list.ct_ptrs - 1];
-			s->free_list.size[s->free_list.ct_ptrs - 1] = s->free_list.size[found_idx];
-			s->free_list.size[found_idx] = temp_size;
-			s->free_list.ct_ptrs--;
-			return return_ptr;
+		if (smallest_fit != MAX_UINT64) {
+			stag_u64 best_ml1_idx = smallest_fit_position / ILT_ML0_CT;
+			stag_u64 best_ml1_group = (smallest_fit_position / ILT_GROUPS_COUNT) % ILT_GROUPS_COUNT;
+			s->free_list.ilt.ml0[(smallest_fit_position / ILT_GROUPS_COUNT)] &= ~(1llu << (smallest_fit_position % ILT_GROUPS_COUNT));
+			ilt_unset_ml1_group(&s->free_list.ilt, best_ml1_idx, best_ml1_group);
+			s->free_list.ilt.used_count--;
+			return (void*)s->free_list.ptr[smallest_fit_position];
 		}
 	}
 
 	/*s->mem_cmt always stays aligned to page boundary*/
-	if (delta_offset > s->mem_committed) {
-		stag_u64 delta_commit = STC_ALIGN_UP(delta_offset - s->mem_committed, PAGESIZE);
+	if (size_new > s->mem_committed) {
+		stag_u64 delta_commit = STC_ALIGN_UP(size_new - s->mem_committed, PAGESIZE);
 		stag_u64 new_total_commit = delta_commit + s->mem_committed;
+		assert((s->mem_committed % 4096) == 0);
 		if (stc_os_mem_cmt((stc_byte*)s->base + s->mem_committed, delta_commit) == NULL) {
 			perror("mprotect");
+			exit(1);
 		}
+		assert((s->mem_committed % 4096) == 0);
 
 		s->mem_committed = new_total_commit;
 	}
 
-	s->base_offset = delta_offset;
+	s->base_offset = size_new;
 
 	return (void*)start_new;
 }
@@ -320,13 +370,16 @@ void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_si
 
 void stc_stack_free(struct stc_stack *s, void* mem_addrs, stag_u64 size)
 {
-
-	if (s->free_list.ct_ptrs < MAX_FREE_LIST_ELEMENTS) {
-		s->free_list.ptr[s->free_list.ct_ptrs] = mem_addrs;
-		s->free_list.size[s->free_list.ct_ptrs] = size;
-		s->free_list.ct_ptrs++;
-	}
+	stag_u64 next_index = ilt_next_idx(&s->free_list.ilt);
+	s->free_list.ptr[next_index] = (stag_u64)mem_addrs;
+	s->free_list.size[next_index] = size;
+	ilt_count_inc(&s->free_list.ilt);
 }
+
+
+
+
+
 
 void stc_stack_pop(struct stc_stack *stack, stag_u64 size)
 {
@@ -351,17 +404,6 @@ void stack_end(struct stc_stack *s)
 }
 
 /*============================================*/
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -434,7 +476,7 @@ stag_f64 stag_string_to_float(struct stag_string *string)
 
 stag_bool32 stag_check_cmd_exists(struct stag_string target)
 {
-	for (stag_u64 i = 2; i < USER_COMMANDS_COUNT; ++i) {
+	for (stag_u64 i = STAG_HELP; i < USER_COMMANDS_COUNT; ++i) {
 		struct stag_string name_long = stag_ctx.user_data[i].cmd_name;
 		struct stag_string name_short = stag_ctx.user_data[i].cmd_short;
 		stag_bool32 is_name_long = stag_strcmp(target, name_long);
@@ -452,11 +494,16 @@ void stag_parse(void)
 	char **end = stag_ctx.argv + stag_ctx.argc;
 
 	if (*start == NULL) {
-		printf("err\n");
+		fprintf(stderr, "No input detected. Try available commands:\n");
+		for (stag_u64 j = 2; j < USER_COMMANDS_COUNT; ++j) {
+			printf("%s %s : %s\n",
+			       stag_ctx.user_data[j].cmd_name.str,
+			       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
+			       stag_ctx.user_data[j].cmd_description.str
+			      );
+		}
 		exit(1);
 	}
-
-	int ct = 0;
 
 	struct stag_string *input = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, stag_ctx.argc);
 	stag_u64 input_len = 0;
@@ -472,74 +519,69 @@ void stag_parse(void)
 
 	stag_u64 idx = 0;
 	while (idx < input_len) {
-		for (stag_u64 i = 2; i < USER_COMMANDS_COUNT; ++i) {
-			struct stag_cmd_array current = {};
-			current.cmd = (enum stag_user_commands)i;
-			struct stag_string cmd = {0};
-			stag_bool32 has_args = stag_ctx.user_data[i].takes_args;
-
-
-			if (stag_strcmp(input[idx], STAG_STR("--help")) || stag_strcmp(input[idx], STAG_STR("-h"))) {
-				printf("Available commands:\n");
-				for (stag_u64 j = 2; j < USER_COMMANDS_COUNT; ++j) {
-					printf("%s %s : %s\n",
-					       stag_ctx.user_data[j].cmd_name.str,
-					       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
-					       stag_ctx.user_data[j].cmd_description.str
-					);
-				}
-				exit(1);
+		struct stag_string current = stag_strip_arg_at_delim(input[idx], '=');
+		if (!stag_check_cmd_exists(current)) {
+			fprintf(stderr, "[ERROR] Command %.*s not found\n", (int)current.len, current.str);
+			exit(1);
+		}
+		if (stag_strcmp(input[idx], STAG_STR("--help")) || stag_strcmp(input[idx], STAG_STR("-h"))) {
+			printf("Available commands:\n");
+			for (stag_u64 j = 2; j < USER_COMMANDS_COUNT; ++j) {
+				printf("%s %s : %s\n",
+				       stag_ctx.user_data[j].cmd_name.str,
+				       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
+				       stag_ctx.user_data[j].cmd_description.str
+				      );
 			}
+			exit(0);
+		}
+		++idx;
+	}
 
-			stag_bool32 cmd_exists = stag_check_cmd_exists(stag_strip_arg_upto_delim((input[idx]), '='));
-			if (!cmd_exists) {
-				printf("Command '%.*s' does not exist\nUse '--help' to view commands\n", (int)input[idx].len, input[idx].str);
-				exit(1);
-			}
+	idx = 0;
+	while (idx < input_len) {
+		for (stag_u64 cmd_idx = 2; cmd_idx < USER_COMMANDS_COUNT; ++cmd_idx) {
+			struct stag_cmd_array cmd_current = {};
+			cmd_current.cmd = (enum stag_user_commands)cmd_idx;
+			stag_bool32 has_args = stag_ctx.user_data[cmd_idx].takes_args;
+			struct stag_string current = stag_strip_arg_at_delim(input[idx], '=');
 
-			if (has_args) {
-				char delim = stag_ctx.user_data[i].arg_delimiter;
-				if (delim == ' ') {
-					cmd = input[idx];
-					++idx;
-					current.args = input[idx];
-				} else {
-					cmd = stag_strip_arg_upto_delim(input[idx], delim);
-					current.args.str = input[idx].str + cmd.len + 1;
-					current.args.len = __builtin_strlen(current.args.str);
 
-					if (stag_strcmp(stag_ctx.user_data[i].cmd_name, cmd) || stag_strcmp(stag_ctx.user_data[i].cmd_short, cmd)) {
-					}
-				}
-			} else {
-				cmd = input[idx];
-			}
+			stag_bool32 is_match_name_short = stag_strcmp(current, stag_ctx.user_data[cmd_idx].cmd_short);
+			stag_bool32 is_match_name_long = stag_strcmp(current, stag_ctx.user_data[cmd_idx].cmd_name);
+			stag_bool32 is_match = is_match_name_long || is_match_name_short;
 
-			stag_bool32 is_string_match = stag_strcmp(stag_ctx.user_data[i].cmd_name, cmd) || stag_strcmp(stag_ctx.user_data[i].cmd_short, cmd);
-
-			if (is_string_match) {
+			if (is_match) {
 				if (has_args) {
-					if (current.args.len == 0) {
+					if (current.len >= input[idx].len) {
+						fprintf(stderr, "[Error] Command '%.*s' : %s\n",
+							(int)input[idx].len, input[idx].str,
+							*stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str
+							? stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str
+							: "missing arg");
+						exit(1);
+					}
+					cmd_current.args.str = input[idx].str + current.len + 1;
+					cmd_current.args.len = input[idx].len - current.len - 1;
+					if (cmd_current.args.len == 0) {
 						fprintf(
 							stderr,
 							"[Error] Command '%.*s' : %s\n",
 							(int)input[idx].len,
 							input[idx].str,
-							*stag_ctx.user_data[i].arg_missing_err_msg.str ?
-							stag_ctx.user_data[i].arg_missing_err_msg.str : "missing arg"
+							*stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str ?
+							stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str : "missing arg"
 
 						    );
 						exit(1);
 					}
 				}
-
-				stag_cmd_array_append(current);
+				stag_cmd_array_append(cmd_current);
 				break;
 			}
 		}
 		++idx;
 	}
-
 
 	stag_cmd_array_append((struct stag_cmd_array){.cmd = NIL});
 }
@@ -567,9 +609,13 @@ void stag_run(int argc, char **argv)
 void stag_cmd_array_append(struct stag_cmd_array cmd)
 {
 	stag_u64 element_count_from_size = stag_ctx.cmtd / sizeof(*stag_ctx.cmd_array);
-	if (stag_ctx.cmd_array_len == 0 || stag_ctx.cmd_array_len >= element_count_from_size) {
-		int new_size = STC_ALIGN_UP(sizeof(*stag_ctx.cmd_array), PAGESIZE);
-		stc_os_mem_cmt(stag_ctx.cmd_array + stag_ctx.cmtd, new_size);
+	if (stag_ctx.cmd_array_len >= element_count_from_size) {
+		stag_u64 new_size = STC_ALIGN_UP(sizeof(*stag_ctx.cmd_array), PAGESIZE);
+		if (stc_os_mem_cmt((stag_u8*)stag_ctx.cmd_array + stag_ctx.cmtd, new_size) == NULL) {
+			perror("mprotect");
+			fprintf(stderr, "[STAG_ERROR]Mprotect failed in file %s at line %d", __FILE__, __LINE__);
+			exit(1);
+		}
 		stag_ctx.cmtd += new_size;
 	}
 	stag_ctx.cmd_array[stag_ctx.cmd_array_len++] = cmd;
@@ -583,18 +629,17 @@ struct stag_cmd_array stag_next_cmd(void)
 
 
 
-struct stag_string stag_strip_arg_at_delim(char *string, char delim)
+struct stag_string stag_strip_arg_at_delim(struct stag_string string, char delim)
 {
-	struct stag_string pl = {0};
+	struct stag_string pl = {.str = string.str, .len = string.len};
 
-	while(string++) {
-		if (*string == delim) {
-			string++;
-			pl.str = string;
+	for (stag_u64 i = 0; i < string.len; ++i) {
+		if  (string.str[i] == delim) {
+			pl.len = i;
 			break;
 		}
 	}
-	pl.len = __builtin_strlen(pl.str);
+
 	return pl;
 }
 
@@ -657,7 +702,7 @@ struct stag_array_signed stag_string_to_array_of_signed(struct stag_string input
 {
 	struct stag_array_signed pl = {0};
 
-	pl.values = (stag_i64 *)stc_stack_push(stag_ctx.scratch, stag_i64, input.len);
+	pl.values = (stag_i64 *)stc_stack_push(stag_ctx.scratch, stag_i64, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -688,7 +733,7 @@ struct stag_array_unsigned stag_string_to_array_of_unsigned(struct stag_string i
 {
 	struct stag_array_unsigned pl = {0};
 
-	pl.values = (stag_u64 *)stc_stack_push(stag_ctx.scratch, stag_u64, input.len);
+	pl.values = (stag_u64 *)stc_stack_push(stag_ctx.scratch, stag_u64, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -718,7 +763,7 @@ struct stag_array_float stag_string_to_array_of_floats(struct stag_string input,
 {
 	struct stag_array_float pl = {0};
 
-	pl.values = (stag_f64 *)stc_stack_push(stag_ctx.scratch, stag_f64, input.len);
+	pl.values = (stag_f64 *)stc_stack_push(stag_ctx.scratch, stag_f64, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -748,7 +793,7 @@ struct stag_array_float stag_string_to_array_of_floats(struct stag_string input,
 struct stag_array_string stag_string_to_array_of_strings(struct stag_string input, char delim)
 {
 	struct stag_array_string pl = {0};
-	pl.strings = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, input.len);
+	pl.strings = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -802,4 +847,128 @@ stag_u64 next_pow2(stag_u64 n)
 	n |= n >> 32;
 	n++;
 	return n;
+}
+
+
+
+
+stag_u64 ilt_get_real_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups, stag_u64 ml0_bit_offset)
+{
+	return ml1_idx * ILT_ML0_CT + ml1_current_full_groups * ILT_GROUPS_COUNT + ml0_bit_offset;
+}
+
+
+void ilt_set_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group)
+{
+	ilt->ml1[ml1_idx] |= (1llu << ml1_group);
+
+	if (ilt->ml1[ml1_idx] == ~0ULL) {
+		ilt->ml2 |= (1llu << ml1_idx);
+	}
+}
+
+
+void ilt_unset_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group)
+{
+	ilt->ml1[ml1_idx] &= ~(1llu << ml1_group);
+
+	if (ilt->ml1[ml1_idx] != ~0ULL) {
+		ilt->ml2 &= ~(1llu << ml1_idx);
+	}
+}
+
+
+stag_u64 ilt_get_ml0_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups)
+{
+	return ml1_idx * ILT_GROUPS_COUNT + ml1_current_full_groups;
+}
+
+void ilt_count_inc(struct stc_ilt *ilt)
+{
+	ilt->used_count++;
+}
+
+void ilt_count_dec(struct stc_ilt *ilt)
+{
+	ilt->used_count--;
+}
+
+
+struct ilt_ctx_frame ilt_get_ctx_frame(struct stc_ilt *ilt)
+{
+	struct ilt_ctx_frame pl;
+	stag_u64 ml2_free_mask = ~ilt->ml2;
+	if (!ml2_free_mask) {
+		printf("ILT is full\nAborting\n");
+		pl.ml0_bit = ~0ULL;
+		pl.ml1_idx = ~0ULL;
+		pl.ml0_idx = ~0ULL;
+		pl.ml1_group = ~0ULL;
+		return pl;
+	}
+	stag_u64 ml1_idx = __builtin_ctzll(ml2_free_mask);
+	stag_u64 ml1_free_mask = ~ilt->ml1[ml1_idx];
+	assert(ml1_free_mask != 0);
+	stag_u64 group = __builtin_ctzll(ml1_free_mask);
+	stag_u64 ml0_idx = ilt_get_ml0_idx(ml1_idx, group);
+	stag_u64 ml0_free_mask = ~ilt->ml0[ml0_idx];
+	assert(ml0_free_mask != 0);
+	stag_u64 bit = __builtin_ctzll(ml0_free_mask);
+	pl.ml1_idx = ml1_idx;
+	pl.ml0_idx = ml0_idx;
+	pl.ml0_bit = bit;
+	pl.ml1_group = group;
+
+	return pl;
+}
+
+
+stag_bool32 ilt_is_full(struct stc_ilt *ilt)
+{
+	return ilt_top_idx(ilt) == ~0ULL;
+}
+
+inline stag_bool32 ilt_is_empty(struct stc_ilt *ilt)
+{
+	return ilt->used_count == 0;
+}
+
+
+stag_u64 ilt_top_idx(struct stc_ilt *ilt)
+{
+	struct ilt_ctx_frame frame = ilt_get_ctx_frame(ilt);
+	if (frame.ml1_idx == ~0ULL)
+		return ~0ULL;
+
+	return ilt_get_real_idx(frame.ml1_idx, frame.ml1_group, frame.ml0_bit);
+}
+
+stag_u64 ilt_next_idx(struct stc_ilt *ilt)
+{
+	stag_u64 ml2_free = ~ilt->ml2;
+	if (unlikely(ml2_free == 0)) {
+		printf("ILT is full\nAborting\n");
+		exit(1);
+	}
+
+	while(ml2_free) {
+		stag_u64 ml1_idx = __builtin_ctzll(ml2_free);
+		ml2_free &= ml2_free - 1;
+		stag_u64 ml1_free = ~ilt->ml1[ml1_idx];
+		if (!ml1_free) continue;
+
+		stag_u64 found = __builtin_ctzll(ml1_free);
+
+		stag_u64 ml0_idx = ilt_get_ml0_idx(ml1_idx, found);
+		stag_u64 ml0_free = ~ilt->ml0[ml0_idx];
+		assert(ml0_free != 0);
+		stag_u64 next_ml0_idx = __builtin_ctzll(ml0_free);
+		ilt->ml0[ml0_idx] |= (1ULL << next_ml0_idx);
+		if (ilt->ml0[ml0_idx] == ~0ULL) {
+			ilt_set_ml1_group(ilt, ml1_idx, found);
+		}
+		return ilt_get_real_idx(ml1_idx, found, next_ml0_idx);
+	}
+
+	return ~0ULL;
 }
