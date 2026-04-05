@@ -1,17 +1,17 @@
 #include <assert.h>
-
+#include <stdint.h>
 typedef float	stag_f32;
 typedef double	stag_f64;
 
-typedef unsigned char		stag_u8;
-typedef unsigned short		stag_u16;
-typedef unsigned int		stag_u32;
-typedef unsigned int long	stag_u64;
+typedef uint8_t			stag_u8;
+typedef uint16_t		stag_u16;
+typedef uint32_t		stag_u32;
+typedef uint64_t		stag_u64;
 
-typedef char		stag_i8;
-typedef short		stag_i16;
-typedef int		stag_i32;
-typedef int long	stag_i64;
+typedef int8_t		stag_i8;
+typedef int16_t		stag_i16;
+typedef int32_t		stag_i32;
+typedef int64_t		stag_i64;
 
 typedef stag_u8		stag_bool8;
 typedef stag_u16	stag_bool16;
@@ -55,7 +55,6 @@ typedef stag_u64	stag_bool64;
 #define f32 stag_f32
 #define f64 stag_f64
 #endif
-
 
 
 struct stag_string{
@@ -103,7 +102,7 @@ struct stag_cmd_array{
 };
 
 struct stag_ctx{
-	struct stc_stack	*scratch;
+	struct stag_stack	*scratch;
 	int			argc;
 	char			**argv;
 
@@ -117,10 +116,10 @@ struct stag_ctx{
 
 
 /*FUNC DEFS*/
-static stag_bool32 is_prime(stag_u64 n);
-static stag_u64 next_prime(stag_u64 n);
-static stag_bool32 is_pow2(stag_u64 n);
-static stag_u64 next_pow2(stag_u64 n);
+static stag_bool32 stag_is_prime(stag_u64 n);
+static stag_u64 stag_next_prime(stag_u64 n);
+static stag_bool32 stag_is_pow2(stag_u64 n);
+static stag_u64 stag_next_pow2(stag_u64 n);
 static void stag_parse(void);
 struct stag_string stag_strip_arg_upto_delim(struct stag_string string, char delim);
 static void stag_run(int argc, char **argv);
@@ -131,13 +130,19 @@ static stag_f64 stag_string_to_float(struct stag_string *string);
 static stag_i64 stag_string_to_i64(struct stag_string *string);
 static stag_u64 stag_string_to_u64(struct stag_string *string);
 struct stag_string stag_strip_arg_at_delim(struct stag_string string, char delim); /*UNUSED*/
+struct stag_array_string stag_string_to_array_of_strings(struct stag_string input, char delim);
 
+#ifndef likely
 #define likely(x) __builtin_expect(!!(x), 1)
+#endif
+#ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
+#endif
 
 
 #include <stdlib.h>
 #include <stdio.h>
+
 
 /*============================================*/
 /*@ALLOCATOR*/
@@ -145,16 +150,16 @@ struct stag_string stag_strip_arg_at_delim(struct stag_string string, char delim
 #include <stddef.h>
 
 
-#define stc_stack_start(stack)\
+#define stag_stack_start(stack)\
 	stack->checkpoint_offset = stack->base_offset
 
-#define stc_stack_end(stack)\
+#define stag_stag_stack_end(stack)\
 	stack->base_offset = stack->checkpoint_offset
 
-#define stc_stack_push(__stack, __type, __count)\
-	_stc_stack_push((__stack), __alignof__(__type), (sizeof(__type) * (__count)))
+#define stag_stack_push(__stack, __type, __count)\
+	_stag_stack_push((__stack), __alignof__(__type), (sizeof(__type) * (__count)))
 
-#define stc_byte char
+#define stag_byte char
 #define STC_ALIGN_UP(x, align) (((x) + ((align)-1)) & ~((align)-1))
 #define SELECT(cond, when_true, when_false) ((when_true) * (cond) | (when_false) * !(cond))
 #define PAGESIZE 4096
@@ -163,17 +168,17 @@ struct stag_string stag_strip_arg_at_delim(struct stag_string string, char delim
 
 #ifdef _WIN32
 #include <windows.h>
-static void *stc_os_alloc_default(stag_u64 size)
+static void *stag_os_alloc_default(stag_u64 size)
 {
 	return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 }
 
-void *stc_os_mem_rsrv(stag_u64 size)
+void *stag_os_mem_rsrv(stag_u64 size)
 {
 	return VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
 }
 
-void *stc_os_mem_cmt(void* addrs, stag_u64 size)
+void *stag_os_mem_cmt(void* addrs, stag_u64 size)
 {
 	return VirtualAlloc(addrs, size, MEM_COMMIT, PAGE_READWRITE);
 }
@@ -181,23 +186,23 @@ void *stc_os_mem_cmt(void* addrs, stag_u64 size)
 #include <sys/mman.h>
 
 
-void *stc_os_alloc_default(stag_u64 size)
+void *stag_os_alloc_default(stag_u64 size)
 {
 	return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1 , 0);
 
 }
 
-void *stc_os_mem_rsrv(stag_u64 size)
+void *stag_os_mem_rsrv(stag_u64 size)
 {
 	return mmap(NULL, size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1 , 0);
 }
 
-void *stc_os_mem_cmt(void* addrs, stag_u64 size)
+void *stag_os_mem_cmt(void* addrs, stag_u64 size)
 {
 	size = STC_ALIGN_UP(size, PAGESIZE);
 	int res = mprotect(addrs, size, PROT_READ | PROT_WRITE);
 	if (unlikely(res != 0)) {
-		stc_byte buff[64];
+		stag_byte buff[64];
 		printf("mprotect code: %d\n", res);
 		return NULL;
 	}
@@ -219,7 +224,7 @@ void *stc_os_mem_cmt(void* addrs, stag_u64 size)
 #define ILT_NIL_REAL_IDX (~0ULL)
 
 
-struct stc_ilt{
+struct stag_ilt{
 	stag_u64	ml0[ILT_ML0_CT];
 	stag_u64	ml0_count;
 	stag_u64	ml1[ILT_GROUPS_COUNT];
@@ -231,66 +236,71 @@ struct stc_ilt{
 
 
 
-struct ilt_ctx_frame{
+struct stag_ilt_ctx_frame{
 	stag_u64	ml1_idx;
 	stag_u64	ml1_group;
 	stag_u64	ml0_idx;
 	stag_u64	ml0_bit;
 };
 
-static stag_u64 ilt_next_idx(struct stc_ilt *ilt);
-static stag_u64 ilt_top_idx(struct stc_ilt *ilt);
-static stag_bool32 ilt_is_empty(struct stc_ilt *ilt);
-static stag_bool32 ilt_is_full(struct stc_ilt *ilt);
-static stag_u64 ilt_get_ml0_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups);
-static stag_u64 ilt_get_real_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups, stag_u64 ml0_bit_offset);
-static void ilt_set_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group);
-static void ilt_unset_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group);
-static void ilt_count_inc(struct stc_ilt *ilt);
-static void ilt_count_dec(struct stc_ilt *ilt);
-static struct ilt_ctx_frame ilt_get_ctx_frame(struct stc_ilt *ilt);
+
+
+/*@FUNCS*/
+static struct stag_string stag_join_space_args(struct stag_string *input, stag_u64 first, stag_u64 last_exclusive);
+static enum stag_user_commands stag_match_cmd(struct stag_string token, struct stag_string *current_out);
+static stag_u64 stag_ilt_next_idx(struct stag_ilt *ilt);
+static stag_u64 stag_ilt_top_idx(struct stag_ilt *ilt);
+static stag_bool32 stag_ilt_is_empty(struct stag_ilt *ilt);
+static stag_bool32 stag_ilt_is_full(struct stag_ilt *ilt);
+static stag_u64 stag_ilt_get_ml0_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups);
+static stag_u64 stag_ilt_get_real_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups, stag_u64 ml0_bit_offset);
+static void stag_ilt_set_ml1_group(struct stag_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group);
+static void stag_ilt_unset_ml1_group(struct stag_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group);
+static void stag_ilt_count_inc(struct stag_ilt *ilt);
+static void stag_ilt_count_dec(struct stag_ilt *ilt);
+static struct stag_ilt_ctx_frame stag_ilt_get_ctx_frame(struct stag_ilt *ilt);
 
 
 
 
-struct free_list {
-	struct stc_ilt	ilt;
+struct stag_free_list {
+	struct stag_ilt	ilt;
 	stag_u64		*ptr;
 	stag_u64		*size;
 };
 
-struct stc_stack {
-	struct free_list	free_list;
+struct stag_stack {
+	struct stag_free_list	stag_free_list;
 	stag_u64		mem_rsrv;
 	stag_u64		mem_committed;
 	stag_u64		base_offset;
 	stag_u64		checkpoint_offset;
-	stc_byte		*base;
+	stag_byte		*base;
 };
-#define STACK_HEADER_SIZE sizeof(struct stc_stack)
+#define STACK_HEADER_SIZE sizeof(struct stag_stack)
 
 
 
 
-struct stc_stack *stc_stack_gen(stag_u64 rsrv)
+struct stag_stack *stag_stack_gen(stag_u64 rsrv)
 {
 
-	if (!is_pow2(rsrv))
-		rsrv = STC_ALIGN_UP(next_pow2(rsrv), PAGESIZE);
+	if (!stag_is_pow2(rsrv))
+		rsrv = STC_ALIGN_UP(stag_next_pow2(rsrv), PAGESIZE);
 
-	stc_byte *block = (stc_byte *)stc_os_mem_rsrv(rsrv);
-	stc_byte *stack_ptr_start = (stc_byte *)STC_ALIGN_UP((stag_u64)block + STACK_HEADER_SIZE, PAGESIZE);
-	if (unlikely(stc_os_mem_cmt(block, STACK_HEADER_SIZE) == NULL)) {
+	stag_byte *block = (stag_byte *)stag_os_mem_rsrv(rsrv);
+	stag_byte *stack_ptr_start = (stag_byte *)STC_ALIGN_UP((stag_u64)block + STACK_HEADER_SIZE, PAGESIZE);
+	if (unlikely(stag_os_mem_cmt(block, STACK_HEADER_SIZE) == NULL)) {
 		printf("Failed block header size\n");
 		perror("mprotect");
 	}
 	rsrv = ((stag_u64)block + rsrv) - (stag_u64)stack_ptr_start;
-	if (unlikely(stc_os_mem_cmt(stack_ptr_start, PAGESIZE) == NULL)) {
+	if (unlikely(stag_os_mem_cmt(stack_ptr_start, PAGESIZE) == NULL)) {
 		printf("Failed at stack ptr start\n");
 		perror("mprotect");
 	}
 
-	struct stc_stack *pl = (struct stc_stack *)block;
+	struct stag_stack *pl = (struct stag_stack *)block;
 	pl->base = stack_ptr_start;
 	pl->mem_rsrv = rsrv;
 	pl->mem_committed = PAGESIZE;
@@ -299,10 +309,10 @@ struct stc_stack *stc_stack_gen(stag_u64 rsrv)
 }
 
 
-void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_size)
+void *_stag_stack_push(struct stag_stack *s, stag_u64 alignment, stag_u64 total_size)
 {
-	if (!is_pow2(alignment))
-		alignment = next_pow2(alignment);
+	if (!stag_is_pow2(alignment))
+		alignment = stag_next_pow2(alignment);
 
 
 	stag_u64 start_old = (stag_u64)s->base + s->base_offset;
@@ -311,24 +321,24 @@ void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_si
 	stag_u64 size_new = end_new - (stag_u64)s->base;
 
 
-	if (!ilt_is_empty(&s->free_list.ilt)) {
+	if (!stag_ilt_is_empty(&s->stag_free_list.ilt)) {
 		stag_u64 smallest_fit = MAX_UINT64;
 		stag_u64 smallest_fit_position = MAX_UINT64;
 		for (stag_u64 ml1_indx = 0; ml1_indx < 64; ++ml1_indx) {
 			for (stag_u64 ml1_group = 0; ml1_group < 64; ++ml1_group) {
-				stag_u64 ml0_idx = ilt_get_ml0_idx((stag_u64)ml1_indx, ml1_group);
+				stag_u64 ml0_idx = stag_ilt_get_ml0_idx((stag_u64)ml1_indx, ml1_group);
 
-				if (s->free_list.ilt.ml0[ml0_idx] != 0) {
+				if (s->stag_free_list.ilt.ml0[ml0_idx] != 0) {
 					int bit_idx = 0;
 					while (bit_idx < 64) {
-						if (!(s->free_list.ilt.ml0[ml0_idx] & (1llu << bit_idx))) {
+						if (!(s->stag_free_list.ilt.ml0[ml0_idx] & (1llu << bit_idx))) {
 							++bit_idx;
 							continue;
 						}
-						stag_u64 real_idx = ilt_get_real_idx(ml1_indx, ml1_group, (stag_u64)bit_idx);
-						if (((stag_u64)(s->free_list.ptr[real_idx] & (alignment - 1)) == 0)) {
-							if (s->free_list.size[real_idx] < smallest_fit && s->free_list.size[real_idx] >= total_size) {
-								smallest_fit = s->free_list.size[real_idx];
+						stag_u64 real_idx = stag_ilt_get_real_idx(ml1_indx, ml1_group, (stag_u64)bit_idx);
+						if (((stag_u64)(s->stag_free_list.ptr[real_idx] & (alignment - 1)) == 0)) {
+							if (s->stag_free_list.size[real_idx] < smallest_fit && s->stag_free_list.size[real_idx] >= total_size) {
+								smallest_fit = s->stag_free_list.size[real_idx];
 								smallest_fit_position = real_idx;
 							}
 						}
@@ -341,10 +351,10 @@ void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_si
 		if (smallest_fit != MAX_UINT64) {
 			stag_u64 best_ml1_idx = smallest_fit_position / ILT_ML0_CT;
 			stag_u64 best_ml1_group = (smallest_fit_position / ILT_GROUPS_COUNT) % ILT_GROUPS_COUNT;
-			s->free_list.ilt.ml0[(smallest_fit_position / ILT_GROUPS_COUNT)] &= ~(1llu << (smallest_fit_position % ILT_GROUPS_COUNT));
-			ilt_unset_ml1_group(&s->free_list.ilt, best_ml1_idx, best_ml1_group);
-			s->free_list.ilt.used_count--;
-			return (void*)s->free_list.ptr[smallest_fit_position];
+			s->stag_free_list.ilt.ml0[(smallest_fit_position / ILT_GROUPS_COUNT)] &= ~(1llu << (smallest_fit_position % ILT_GROUPS_COUNT));
+			stag_ilt_unset_ml1_group(&s->stag_free_list.ilt, best_ml1_idx, best_ml1_group);
+			s->stag_free_list.ilt.used_count--;
+			return (void*)s->stag_free_list.ptr[smallest_fit_position];
 		}
 	}
 
@@ -353,7 +363,7 @@ void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_si
 		stag_u64 delta_commit = STC_ALIGN_UP(size_new - s->mem_committed, PAGESIZE);
 		stag_u64 new_total_commit = delta_commit + s->mem_committed;
 		assert((s->mem_committed % 4096) == 0);
-		if (stc_os_mem_cmt((stc_byte*)s->base + s->mem_committed, delta_commit) == NULL) {
+		if (stag_os_mem_cmt((stag_byte*)s->base + s->mem_committed, delta_commit) == NULL) {
 			perror("mprotect");
 			exit(1);
 		}
@@ -368,12 +378,12 @@ void *_stc_stack_push(struct stc_stack *s, stag_u64 alignment, stag_u64 total_si
 }
 
 
-void stc_stack_free(struct stc_stack *s, void* mem_addrs, stag_u64 size)
+void stag_stack_free(struct stag_stack *s, void* mem_addrs, stag_u64 size)
 {
-	stag_u64 next_index = ilt_next_idx(&s->free_list.ilt);
-	s->free_list.ptr[next_index] = (stag_u64)mem_addrs;
-	s->free_list.size[next_index] = size;
-	ilt_count_inc(&s->free_list.ilt);
+	stag_u64 next_index = stag_ilt_next_idx(&s->stag_free_list.ilt);
+	s->stag_free_list.ptr[next_index] = (stag_u64)mem_addrs;
+	s->stag_free_list.size[next_index] = size;
+	stag_ilt_count_inc(&s->stag_free_list.ilt);
 }
 
 
@@ -381,7 +391,7 @@ void stc_stack_free(struct stc_stack *s, void* mem_addrs, stag_u64 size)
 
 
 
-void stc_stack_pop(struct stc_stack *stack, stag_u64 size)
+void stag_stack_pop(struct stag_stack *stack, stag_u64 size)
 {
 	stag_bool32 cond = stack->base_offset >= size;
 	if (unlikely(!cond)) {
@@ -392,19 +402,18 @@ void stc_stack_pop(struct stc_stack *stack, stag_u64 size)
 }
 
 
-void stack_begin(struct stc_stack *s)
+void stag_stack_begin(struct stag_stack *s)
 {
 	s->checkpoint_offset = s->base_offset;
 }
 
 
-void stack_end(struct stc_stack *s)
+void stag_stack_end(struct stag_stack *s)
 {
 	s->base_offset = s->checkpoint_offset;
 }
 
 /*============================================*/
-
 
 
 static struct stag_ctx stag_ctx = {0};
@@ -488,6 +497,62 @@ stag_bool32 stag_check_cmd_exists(struct stag_string target)
 	return false;
 }
 
+static struct stag_string
+stag_join_space_args(struct stag_string *input, stag_u64 first, stag_u64 last_exclusive)
+{
+	stag_u64 total_len = 0;
+
+	for (stag_u64 i = first; i < last_exclusive; ++i) {
+		total_len += input[i].len;
+		if ((i + 1) < last_exclusive)
+			total_len += 1;
+	}
+
+	char *buf = (char *)stag_stack_push(stag_ctx.scratch, char, total_len + 1);
+	stag_u64 at = 0;
+
+	for (stag_u64 i = first; i < last_exclusive; ++i) {
+		for (stag_u64 j = 0; j < input[i].len; ++j)
+			buf[at++] = input[i].str[j];
+
+		if ((i + 1) < last_exclusive)
+			buf[at++] = ' ';
+	}
+
+	buf[at] = '\0';
+
+	return (struct stag_string){
+		.str = buf,
+		.len = total_len
+	};
+}
+
+
+static enum stag_user_commands
+stag_match_cmd(struct stag_string token, struct stag_string *current_out)
+{
+	for (stag_u64 cmd_idx = STAG_HELP; cmd_idx < USER_COMMANDS_COUNT; ++cmd_idx) {
+		struct stag_string long_name = stag_ctx.user_data[cmd_idx].cmd_name;
+		struct stag_string short_name = stag_ctx.user_data[cmd_idx].cmd_short;
+		char delim = stag_ctx.user_data[cmd_idx].arg_delimiter;
+
+		struct stag_string current = token;
+
+		if (delim && delim != ' ')
+			current = stag_strip_arg_at_delim(token, delim);
+
+		if (stag_strcmp(current, long_name) ||
+		    (*short_name.str && stag_strcmp(current, short_name))) {
+			if (current_out) *current_out = current;
+			return (enum stag_user_commands)cmd_idx;
+		}
+	}
+
+	return NIL;
+}
+
+
+/*@PARSE*/
 void stag_parse(void)
 {
 	char **start = stag_ctx.argv + 1;
@@ -499,16 +564,15 @@ void stag_parse(void)
 			printf("%s %s : %s\n",
 			       stag_ctx.user_data[j].cmd_name.str,
 			       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
-			       stag_ctx.user_data[j].cmd_description.str
-			      );
+			       stag_ctx.user_data[j].cmd_description.str);
 		}
 		exit(1);
 	}
 
-	struct stag_string *input = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, stag_ctx.argc);
+	struct stag_string *input =
+		(struct stag_string *)stag_stack_push(stag_ctx.scratch, struct stag_string, stag_ctx.argc);
+
 	stag_u64 input_len = 0;
-
-
 	while (start != end) {
 		input[input_len].str = *start;
 		input[input_len].len = __builtin_strlen(*start);
@@ -516,90 +580,134 @@ void stag_parse(void)
 		++start;
 	}
 
-
+	/* pass 1: validate */
 	stag_u64 idx = 0;
 	while (idx < input_len) {
-		struct stag_string current = stag_strip_arg_at_delim(input[idx], '=');
-		if (!stag_check_cmd_exists(current)) {
-			fprintf(stderr, "[ERROR] Command %.*s not found\n", (int)current.len, current.str);
+		struct stag_string current = {0};
+		enum stag_user_commands cmd = stag_match_cmd(input[idx], &current);
+
+		if (cmd == NIL) {
+			fprintf(stderr, "[ERROR] Command %.*s not found\n",
+				(int)input[idx].len, input[idx].str);
 			exit(1);
 		}
-		if (stag_strcmp(input[idx], STAG_STR("--help")) || stag_strcmp(input[idx], STAG_STR("-h"))) {
+
+		if (stag_strcmp(current, STAG_STR("--help")) || stag_strcmp(current, STAG_STR("-h"))) {
 			printf("Available commands:\n");
 			for (stag_u64 j = 2; j < USER_COMMANDS_COUNT; ++j) {
 				printf("%s %s : %s\n",
 				       stag_ctx.user_data[j].cmd_name.str,
 				       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
-				       stag_ctx.user_data[j].cmd_description.str
-				      );
+				       stag_ctx.user_data[j].cmd_description.str);
 			}
 			exit(0);
 		}
-		++idx;
-	}
 
-	idx = 0;
-	while (idx < input_len) {
-		for (stag_u64 cmd_idx = 2; cmd_idx < USER_COMMANDS_COUNT; ++cmd_idx) {
-			struct stag_cmd_array cmd_current = {};
-			cmd_current.cmd = (enum stag_user_commands)cmd_idx;
-			stag_bool32 has_args = stag_ctx.user_data[cmd_idx].takes_args;
-			struct stag_string current = stag_strip_arg_at_delim(input[idx], '=');
+		if (stag_ctx.user_data[cmd].takes_args) {
+			char delim = stag_ctx.user_data[cmd].arg_delimiter;
 
+			if (delim == ' ') {
+				stag_u64 first_arg = idx + 1;
+				stag_u64 scan = first_arg;
 
-			stag_bool32 is_match_name_short = stag_strcmp(current, stag_ctx.user_data[cmd_idx].cmd_short);
-			stag_bool32 is_match_name_long = stag_strcmp(current, stag_ctx.user_data[cmd_idx].cmd_name);
-			stag_bool32 is_match = is_match_name_long || is_match_name_short;
-
-			if (is_match) {
-				if (has_args) {
-					if (current.len >= input[idx].len) {
-						fprintf(stderr, "[Error] Command '%.*s' : %s\n",
-							(int)input[idx].len, input[idx].str,
-							*stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str
-							? stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str
-							: "missing arg");
-						exit(1);
-					}
-					cmd_current.args.str = input[idx].str + current.len + 1;
-					cmd_current.args.len = input[idx].len - current.len - 1;
-					if (cmd_current.args.len == 0) {
-						fprintf(
-							stderr,
-							"[Error] Command '%.*s' : %s\n",
-							(int)input[idx].len,
-							input[idx].str,
-							*stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str ?
-							stag_ctx.user_data[cmd_idx].arg_missing_err_msg.str : "missing arg"
-
-						    );
-						exit(1);
-					}
+				while (scan < input_len) {
+					struct stag_string maybe_cmd = {0};
+					if (stag_match_cmd(input[scan], &maybe_cmd) != NIL)
+						break;
+					++scan;
 				}
-				stag_cmd_array_append(cmd_current);
-				break;
+
+				if (scan == first_arg) {
+					fprintf(stderr, "[Error] Command '%.*s' : %s\n",
+						(int)input[idx].len,
+						input[idx].str,
+						*stag_ctx.user_data[cmd].arg_missing_err_msg.str
+							? stag_ctx.user_data[cmd].arg_missing_err_msg.str
+							: "missing arg");
+					exit(1);
+				}
+
+				idx = scan;
+			}
+			else {
+				struct stag_string stripped = stag_strip_arg_at_delim(input[idx], delim);
+				if (stripped.len >= input[idx].len) {
+					fprintf(stderr, "[Error] Command '%.*s' : %s\n",
+						(int)input[idx].len,
+						input[idx].str,
+						*stag_ctx.user_data[cmd].arg_missing_err_msg.str
+							? stag_ctx.user_data[cmd].arg_missing_err_msg.str
+							: "missing arg");
+					exit(1);
+				}
+				idx++;
 			}
 		}
-		++idx;
+		else {
+			idx++;
+		}
 	}
 
-	stag_cmd_array_append((struct stag_cmd_array){.cmd = NIL});
+	/* pass 2: build cmd array */
+	idx = 0;
+	while (idx < input_len) {
+		struct stag_string current = {0};
+		enum stag_user_commands cmd = stag_match_cmd(input[idx], &current);
+
+		if (cmd == NIL) {
+			fprintf(stderr, "[ERROR] Command %.*s not found\n",
+				(int)input[idx].len, input[idx].str);
+			exit(1);
+		}
+
+		struct stag_cmd_array cmd_current = {0};
+		cmd_current.cmd = cmd;
+
+		if (stag_ctx.user_data[cmd].takes_args) {
+			char delim = stag_ctx.user_data[cmd].arg_delimiter;
+
+			if (delim == ' ') {
+				stag_u64 first_arg = idx + 1;
+				stag_u64 scan = first_arg;
+
+				while (scan < input_len) {
+					struct stag_string maybe_cmd = {0};
+					if (stag_match_cmd(input[scan], &maybe_cmd) != NIL)
+						break;
+					++scan;
+				}
+
+				cmd_current.args = stag_join_space_args(input, first_arg, scan);
+				idx = scan;
+			}
+			else {
+				cmd_current.args.str = input[idx].str + current.len + 1;
+				cmd_current.args.len = input[idx].len - current.len - 1;
+				idx++;
+			}
+		}
+		else {
+			idx++;
+		}
+
+		stag_cmd_array_append(cmd_current);
+	}
+
+	stag_cmd_array_append((struct stag_cmd_array){ .cmd = NIL });
 }
-
-
 
 /*@RUN*/
 void stag_run(int argc, char **argv)
 {
 
-	stag_ctx.scratch = stc_stack_gen(STAG_MAX_RESERVATION);
+	stag_ctx.scratch = stag_stack_gen(STAG_MAX_RESERVATION);
 	stag_ctx.user_data = stag_table;
 	stag_ctx.argc = argc;
 	stag_ctx.argv = argv;
-	stag_ctx.cmd_array = (struct stag_cmd_array*)stc_os_mem_rsrv(STAG_MAX_RESERVATION);
+	stag_ctx.cmd_array = (struct stag_cmd_array*)stag_os_mem_rsrv(STAG_MAX_RESERVATION);
 	int initial_size = STC_ALIGN_UP(sizeof(*stag_ctx.cmd_array), PAGESIZE);
 	stag_ctx.cmtd = initial_size;
-	stc_os_mem_cmt(stag_ctx.cmd_array, initial_size);
+	stag_os_mem_cmt(stag_ctx.cmd_array, initial_size);
 	stag_parse();
 }
 
@@ -611,7 +719,7 @@ void stag_cmd_array_append(struct stag_cmd_array cmd)
 	stag_u64 element_count_from_size = stag_ctx.cmtd / sizeof(*stag_ctx.cmd_array);
 	if (stag_ctx.cmd_array_len >= element_count_from_size) {
 		stag_u64 new_size = STC_ALIGN_UP(sizeof(*stag_ctx.cmd_array), PAGESIZE);
-		if (stc_os_mem_cmt((stag_u8*)stag_ctx.cmd_array + stag_ctx.cmtd, new_size) == NULL) {
+		if (stag_os_mem_cmt((stag_u8*)stag_ctx.cmd_array + stag_ctx.cmtd, new_size) == NULL) {
 			perror("mprotect");
 			fprintf(stderr, "[STAG_ERROR]Mprotect failed in file %s at line %d", __FILE__, __LINE__);
 			exit(1);
@@ -702,7 +810,7 @@ struct stag_array_signed stag_string_to_array_of_signed(struct stag_string input
 {
 	struct stag_array_signed pl = {0};
 
-	pl.values = (stag_i64 *)stc_stack_push(stag_ctx.scratch, stag_i64, input.len + 1);
+	pl.values = (stag_i64 *)stag_stack_push(stag_ctx.scratch, stag_i64, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -733,7 +841,7 @@ struct stag_array_unsigned stag_string_to_array_of_unsigned(struct stag_string i
 {
 	struct stag_array_unsigned pl = {0};
 
-	pl.values = (stag_u64 *)stc_stack_push(stag_ctx.scratch, stag_u64, input.len + 1);
+	pl.values = (stag_u64 *)stag_stack_push(stag_ctx.scratch, stag_u64, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -763,7 +871,7 @@ struct stag_array_float stag_string_to_array_of_floats(struct stag_string input,
 {
 	struct stag_array_float pl = {0};
 
-	pl.values = (stag_f64 *)stc_stack_push(stag_ctx.scratch, stag_f64, input.len + 1);
+	pl.values = (stag_f64 *)stag_stack_push(stag_ctx.scratch, stag_f64, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -793,7 +901,7 @@ struct stag_array_float stag_string_to_array_of_floats(struct stag_string input,
 struct stag_array_string stag_string_to_array_of_strings(struct stag_string input, char delim)
 {
 	struct stag_array_string pl = {0};
-	pl.strings = (struct stag_string*)stc_stack_push(stag_ctx.scratch, struct stag_string, input.len + 1);
+	pl.strings = (struct stag_string*)stag_stack_push(stag_ctx.scratch, struct stag_string, input.len + 1);
 	stag_u64 idx = 0;
 	stag_u64 inner_offset = 0;
 	while (idx < input.len) {
@@ -816,7 +924,7 @@ struct stag_array_string stag_string_to_array_of_strings(struct stag_string inpu
 
 
 
-stag_bool32 is_prime(stag_u64 n) {
+stag_bool32 stag_is_prime(stag_u64 n) {
 	if (n < 2) return false;
 	if ((n & 1) == 0) return n == 2;
 	for (stag_u64 i = 3; i * i <= n; i += 2)
@@ -824,19 +932,19 @@ stag_bool32 is_prime(stag_u64 n) {
 	return (stag_bool32)true;
 }
 
-stag_u64 next_prime(stag_u64 n) {
+stag_u64 stag_next_prime(stag_u64 n) {
 	if (n <= 2) return 2;
 	if ((n & 1) == 0) n++;
-	while (!is_prime(n)) n += 2;
+	while (!stag_is_prime(n)) n += 2;
 	return n;
 }
 
-stag_bool32 is_pow2(stag_u64 n)
+stag_bool32 stag_is_pow2(stag_u64 n)
 {
 	return (n != 0) && (n & (n-1)) == 0;
 }
 
-stag_u64 next_pow2(stag_u64 n)
+stag_u64 stag_next_pow2(stag_u64 n)
 {
 	n--;
 	n |= n >> 1;
@@ -852,13 +960,13 @@ stag_u64 next_pow2(stag_u64 n)
 
 
 
-stag_u64 ilt_get_real_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups, stag_u64 ml0_bit_offset)
+stag_u64 stag_ilt_get_real_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups, stag_u64 ml0_bit_offset)
 {
 	return ml1_idx * ILT_ML0_CT + ml1_current_full_groups * ILT_GROUPS_COUNT + ml0_bit_offset;
 }
 
 
-void ilt_set_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group)
+void stag_ilt_set_ml1_group(struct stag_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group)
 {
 	ilt->ml1[ml1_idx] |= (1llu << ml1_group);
 
@@ -868,7 +976,7 @@ void ilt_set_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group
 }
 
 
-void ilt_unset_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group)
+void stag_ilt_unset_ml1_group(struct stag_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_group)
 {
 	ilt->ml1[ml1_idx] &= ~(1llu << ml1_group);
 
@@ -878,25 +986,25 @@ void ilt_unset_ml1_group(struct stc_ilt *ilt, stag_u64 ml1_idx, stag_u64 ml1_gro
 }
 
 
-stag_u64 ilt_get_ml0_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups)
+stag_u64 stag_ilt_get_ml0_idx(stag_u64 ml1_idx, stag_u64 ml1_current_full_groups)
 {
 	return ml1_idx * ILT_GROUPS_COUNT + ml1_current_full_groups;
 }
 
-void ilt_count_inc(struct stc_ilt *ilt)
+void stag_ilt_count_inc(struct stag_ilt *ilt)
 {
 	ilt->used_count++;
 }
 
-void ilt_count_dec(struct stc_ilt *ilt)
+void stag_ilt_count_dec(struct stag_ilt *ilt)
 {
 	ilt->used_count--;
 }
 
 
-struct ilt_ctx_frame ilt_get_ctx_frame(struct stc_ilt *ilt)
+struct stag_ilt_ctx_frame stag_ilt_get_ctx_frame(struct stag_ilt *ilt)
 {
-	struct ilt_ctx_frame pl;
+	struct stag_ilt_ctx_frame pl;
 	stag_u64 ml2_free_mask = ~ilt->ml2;
 	if (!ml2_free_mask) {
 		printf("ILT is full\nAborting\n");
@@ -910,7 +1018,7 @@ struct ilt_ctx_frame ilt_get_ctx_frame(struct stc_ilt *ilt)
 	stag_u64 ml1_free_mask = ~ilt->ml1[ml1_idx];
 	assert(ml1_free_mask != 0);
 	stag_u64 group = __builtin_ctzll(ml1_free_mask);
-	stag_u64 ml0_idx = ilt_get_ml0_idx(ml1_idx, group);
+	stag_u64 ml0_idx = stag_ilt_get_ml0_idx(ml1_idx, group);
 	stag_u64 ml0_free_mask = ~ilt->ml0[ml0_idx];
 	assert(ml0_free_mask != 0);
 	stag_u64 bit = __builtin_ctzll(ml0_free_mask);
@@ -923,27 +1031,27 @@ struct ilt_ctx_frame ilt_get_ctx_frame(struct stc_ilt *ilt)
 }
 
 
-stag_bool32 ilt_is_full(struct stc_ilt *ilt)
+stag_bool32 stag_ilt_is_full(struct stag_ilt *ilt)
 {
-	return ilt_top_idx(ilt) == ~0ULL;
+	return stag_ilt_top_idx(ilt) == ~0ULL;
 }
 
-inline stag_bool32 ilt_is_empty(struct stc_ilt *ilt)
+inline stag_bool32 stag_ilt_is_empty(struct stag_ilt *ilt)
 {
 	return ilt->used_count == 0;
 }
 
 
-stag_u64 ilt_top_idx(struct stc_ilt *ilt)
+stag_u64 stag_ilt_top_idx(struct stag_ilt *ilt)
 {
-	struct ilt_ctx_frame frame = ilt_get_ctx_frame(ilt);
+	struct stag_ilt_ctx_frame frame = stag_ilt_get_ctx_frame(ilt);
 	if (frame.ml1_idx == ~0ULL)
 		return ~0ULL;
 
-	return ilt_get_real_idx(frame.ml1_idx, frame.ml1_group, frame.ml0_bit);
+	return stag_ilt_get_real_idx(frame.ml1_idx, frame.ml1_group, frame.ml0_bit);
 }
 
-stag_u64 ilt_next_idx(struct stc_ilt *ilt)
+stag_u64 stag_ilt_next_idx(struct stag_ilt *ilt)
 {
 	stag_u64 ml2_free = ~ilt->ml2;
 	if (unlikely(ml2_free == 0)) {
@@ -959,15 +1067,15 @@ stag_u64 ilt_next_idx(struct stc_ilt *ilt)
 
 		stag_u64 found = __builtin_ctzll(ml1_free);
 
-		stag_u64 ml0_idx = ilt_get_ml0_idx(ml1_idx, found);
+		stag_u64 ml0_idx = stag_ilt_get_ml0_idx(ml1_idx, found);
 		stag_u64 ml0_free = ~ilt->ml0[ml0_idx];
 		assert(ml0_free != 0);
 		stag_u64 next_ml0_idx = __builtin_ctzll(ml0_free);
 		ilt->ml0[ml0_idx] |= (1ULL << next_ml0_idx);
 		if (ilt->ml0[ml0_idx] == ~0ULL) {
-			ilt_set_ml1_group(ilt, ml1_idx, found);
+			stag_ilt_set_ml1_group(ilt, ml1_idx, found);
 		}
-		return ilt_get_real_idx(ml1_idx, found, next_ml0_idx);
+		return stag_ilt_get_real_idx(ml1_idx, found, next_ml0_idx);
 	}
 
 	return ~0ULL;
