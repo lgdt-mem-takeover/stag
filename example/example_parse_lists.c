@@ -13,10 +13,10 @@ int main(int argc, char **argv)
 
 	stag_bool32 running = true;
 	struct stag_cmd_array cmd;
-	struct stag_array_string strings;
-	struct stag_array_float floats;
-	struct stag_array_unsigned us;
-	struct stag_array_signed ss;
+	struct stag_array_string strings = {0};
+	struct stag_array_float floats = {0};
+	struct stag_array_unsigned us = {0};
+	struct stag_array_signed ss = {0};
 	while(running) {
 		cmd = stag_next_cmd();
 		switch (cmd.cmd) {

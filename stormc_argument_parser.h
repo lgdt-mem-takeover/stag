@@ -63,14 +63,17 @@ struct stag_string{
 };
 
 
-struct stag_layout{
-	struct stag_string	cmd_name;
-	struct stag_string	cmd_short;
-	struct stag_string	cmd_description;
-	struct stag_string	arg_missing_err_msg;
-	stag_bool64		takes_args;
-	char			arg_delimiter;
+struct stag_cmd_call;
+typedef void *(*stag_cmd_func)(struct stag_cmd_call *);
+struct stag_cmd_call {
+	stag_u64	arg_count;
+	void		*args;
 };
+
+
+#define MAX_FPTR_ARGS_STACK_LEN 1024
+#define MAX_STACK_FRAMES 1024
+
 
 #ifndef STAG_USER_COMMANDS
 #error "Define STAG_USER_COMMANDS with a list of commands"
@@ -78,27 +81,52 @@ struct stag_layout{
 #define STAG_ENUM_ENTRY(name, ...) name,
 enum stag_user_commands{
 	NIL,
+	IMMEDIATE_DISPATCH_FINISHED,
 	STAG_HELP,
 	STAG_USER_COMMANDS(STAG_ENUM_ENTRY)
 #undef STAG_ENUM_ENTRY
 	USER_COMMANDS_COUNT
 };
 
+
+struct stag_layout{
+	struct stag_string	cmd_name;
+	struct stag_string	cmd_short;
+	struct stag_string	cmd_description;
+	struct stag_string	arg_missing_err_msg;
+	stag_bool8		takes_args;
+	char			arg_delimiter;
+	stag_bool8		immediate_dispatch;
+	stag_cmd_func		fptr;
+	struct stag_cmd_call	*fptr_args_immediate;
+	struct {
+		struct stag_cmd_call	*fptr_args[MAX_FPTR_ARGS_STACK_LEN];
+		stag_u64		next;
+		stag_u64		len;
+	}fptr_args_stack;
+
+};
+
 #define STAG_TABLE_ENTRY(_enum, _cmd_name, _cmd_short, _cmd_desc, _err_msg_missing_arg, _takes_args, _arg_delim, ...) \
 	[(_enum)] = {(STAG_STR(_cmd_name)), (STAG_STR(_cmd_short)), (STAG_STR(_cmd_desc)), (STAG_STR(_err_msg_missing_arg)), (_takes_args), (_arg_delim)},
 
-const struct stag_layout stag_table[] = {
-	[NIL] = {STAG_STR(""), STAG_STR(""), false},
+struct stag_layout stag_table[] = {
+	[NIL] = {STAG_STR("")},
+	[IMMEDIATE_DISPATCH_FINISHED] = {STAG_STR("Immediate Dispatch Executed")},
 	[STAG_HELP] = {STAG_STR("--help"), STAG_STR("-h")},
 	STAG_USER_COMMANDS(STAG_TABLE_ENTRY)
 #undef STAG_TABLE_ENTRY
 };
 
 
+static stag_u64 stag_table_cmd_occurance[USER_COMMANDS_COUNT] = {};
+
+
+
 struct stag_cmd_array{
 	enum stag_user_commands		cmd;
 	struct stag_string		args;
-
+	stag_u64			deferred_idx;
 };
 
 struct stag_ctx{
@@ -111,7 +139,7 @@ struct stag_ctx{
 	stag_u64			cmd_array_len;
 	stag_u64			cmd_array_dispatch_ct;
 	stag_u64			cmtd;
-	const struct stag_layout	*user_data;
+	struct stag_layout		*user_data;
 };
 
 
@@ -560,7 +588,7 @@ void stag_parse(void)
 
 	if (*start == NULL) {
 		fprintf(stderr, "No input detected. Try available commands:\n");
-		for (stag_u64 j = 2; j < USER_COMMANDS_COUNT; ++j) {
+		for (stag_u64 j = STAG_HELP + 1; j < USER_COMMANDS_COUNT; ++j) {
 			printf("%s %s : %s\n",
 			       stag_ctx.user_data[j].cmd_name.str,
 			       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
@@ -594,7 +622,7 @@ void stag_parse(void)
 
 		if (stag_strcmp(current, STAG_STR("--help")) || stag_strcmp(current, STAG_STR("-h"))) {
 			printf("Available commands:\n");
-			for (stag_u64 j = 2; j < USER_COMMANDS_COUNT; ++j) {
+			for (stag_u64 j = STAG_HELP + 1; j < USER_COMMANDS_COUNT; ++j) {
 				printf("%s %s : %s\n",
 				       stag_ctx.user_data[j].cmd_name.str,
 				       *stag_ctx.user_data[j].cmd_short.str ? stag_ctx.user_data[j].cmd_short.str : "",
@@ -608,26 +636,12 @@ void stag_parse(void)
 
 			if (delim == ' ') {
 				stag_u64 first_arg = idx + 1;
-				stag_u64 scan = first_arg;
-
-				while (scan < input_len) {
-					struct stag_string maybe_cmd = {0};
-					if (stag_match_cmd(input[scan], &maybe_cmd) != NIL)
-						break;
-					++scan;
-				}
-
-				if (scan == first_arg) {
-					fprintf(stderr, "[Error] Command '%.*s' : %s\n",
-						(int)input[idx].len,
-						input[idx].str,
-						*stag_ctx.user_data[cmd].arg_missing_err_msg.str
-							? stag_ctx.user_data[cmd].arg_missing_err_msg.str
-							: "missing arg");
+				if (first_arg < input_len) {
+					idx += 2;
+				} else {
+					fprintf(stderr, "[Error] End of stream\n");
 					exit(1);
 				}
-
-				idx = scan;
 			}
 			else {
 				struct stag_string stripped = stag_strip_arg_at_delim(input[idx], delim);
@@ -662,23 +676,23 @@ void stag_parse(void)
 
 		struct stag_cmd_array cmd_current = {0};
 		cmd_current.cmd = cmd;
+		cmd_current.deferred_idx = stag_table_cmd_occurance[cmd_current.cmd]++;
 
 		if (stag_ctx.user_data[cmd].takes_args) {
 			char delim = stag_ctx.user_data[cmd].arg_delimiter;
 
 			if (delim == ' ') {
 				stag_u64 first_arg = idx + 1;
-				stag_u64 scan = first_arg;
-
-				while (scan < input_len) {
-					struct stag_string maybe_cmd = {0};
-					if (stag_match_cmd(input[scan], &maybe_cmd) != NIL)
-						break;
-					++scan;
+				if (first_arg < input_len) {
+					cmd_current.args = input[first_arg];
+					idx += 2;
+				} else {
+					fprintf(stderr,
+						"[Error] End of stream after: %s\n",
+						stag_ctx.user_data[cmd].cmd_name.str
+					);
+					exit(1);
 				}
-
-				cmd_current.args = stag_join_space_args(input, first_arg, scan);
-				idx = scan;
 			}
 			else {
 				cmd_current.args.str = input[idx].str + current.len + 1;
@@ -730,9 +744,103 @@ void stag_cmd_array_append(struct stag_cmd_array cmd)
 }
 
 
+
+void stag_register_deferred_args(enum stag_user_commands cmd_id, struct stag_cmd_call *args)
+{
+	stag_u64 *len = &stag_ctx.user_data[cmd_id].fptr_args_stack.len;
+	stag_ctx.user_data[cmd_id].fptr_args_stack.fptr_args[*len] = args;
+	++(*len);
+}
+
+
+void stag_register_immediate_args(enum stag_user_commands cmd_id, struct stag_cmd_call *args)
+{
+	stag_ctx.user_data[cmd_id].fptr_args_immediate = args;
+}
+
+
+void stag_deferred_flush(void)
+{
+	for (stag_u64 i = 0; i < stag_ctx.cmd_array_dispatch_ct; ++i) {
+		struct stag_cmd_array cmd = stag_ctx.cmd_array[i];
+
+		if (stag_ctx.user_data[cmd.cmd].fptr != NULL &&
+		    !stag_ctx.user_data[cmd.cmd].immediate_dispatch) {
+
+			stag_u64 j = cmd.deferred_idx;
+			struct stag_cmd_call *args =
+				stag_ctx.user_data[cmd.cmd].fptr_args_stack.fptr_args[j];
+
+			if (args) {
+				stag_ctx.user_data[cmd.cmd].fptr(args);
+			} else {
+				fprintf(stderr,
+				        "[WARNING] Function argument was null for command %s\n",
+				        stag_ctx.user_data[cmd.cmd].cmd_name.str);
+			}
+		}
+	}
+}
+
+void stag_deferred_flush_for(enum stag_user_commands cmd_id)
+{
+	struct stag_layout *layout = &stag_ctx.user_data[cmd_id];
+
+	if (layout->fptr == NULL || layout->immediate_dispatch) {
+		return;
+	}
+
+	stag_u64 *next = &layout->fptr_args_stack.next;
+	stag_u64 len = layout->fptr_args_stack.len;
+
+	while (*next < len) {
+		struct stag_cmd_call *args = layout->fptr_args_stack.fptr_args[*next];
+		if (args) {
+			layout->fptr(args);
+		} else {
+			fprintf(stderr, "[WARNING] Function argument was null for command %s\n",
+			        layout->cmd_name.str);
+		}
+		++(*next);
+	}
+}
+
+void stag_deferred_for(enum stag_user_commands cmd_id, stag_u64 start, stag_u64 end)
+{
+	if (end == 0) {
+		end = stag_ctx.user_data[cmd_id].fptr_args_stack.len;
+	}
+	if (end > stag_ctx.user_data[cmd_id].fptr_args_stack.len) {
+		fprintf(stderr,
+			"[ERROR] Requested dispatch exceeds length:\nCommand: %s\nReal End: %lu\nRequested End:%lu",
+			stag_ctx.user_data[cmd_id].cmd_name.str,
+			stag_ctx.user_data[cmd_id].fptr_args_stack.len,
+			end
+		);
+	}
+	if (stag_ctx.user_data[cmd_id].fptr != NULL && !stag_ctx.user_data[cmd_id].immediate_dispatch) {
+		for (stag_u64 j = start; j < end; ++j) {
+			struct stag_cmd_call *args = stag_ctx.user_data[cmd_id].fptr_args_stack.fptr_args[j];
+			if (args) {
+				stag_ctx.user_data[cmd_id].fptr(args);
+			} else {
+				fprintf(stderr, "[WARNING] Function argument was null for command %s\n", stag_ctx.user_data[cmd_id].cmd_name.str);
+			}
+		}
+	}
+}
+
+
 struct stag_cmd_array stag_next_cmd(void)
 {
-	return stag_ctx.cmd_array[stag_ctx.cmd_array_dispatch_ct++];
+	struct stag_cmd_array cmd = stag_ctx.cmd_array[stag_ctx.cmd_array_dispatch_ct++];
+	if (stag_ctx.user_data[cmd.cmd].fptr != NULL){
+		if (stag_ctx.user_data[cmd.cmd].immediate_dispatch) {
+			struct stag_cmd_call *args = stag_ctx.user_data[cmd.cmd].fptr_args_immediate;
+			stag_ctx.user_data[cmd.cmd].fptr(args);
+		}
+	}
+	return cmd;
 }
 
 
