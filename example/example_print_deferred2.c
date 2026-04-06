@@ -110,6 +110,8 @@ int main(int argc, char **argv)
 	build_deferred_calls();
 
 	printf("=== deferred flush ===\n\n");
-	stag_deferred_flush();
+	stag_deferred_flush_for(CMD_A);
+	stag_deferred_flush_for(CMD_B);
+
 	return 0;
 }

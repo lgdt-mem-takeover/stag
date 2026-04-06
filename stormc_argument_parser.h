@@ -26,8 +26,12 @@ typedef stag_u64	stag_bool64;
 #define false 0
 #endif
 
+#ifndef STAG_STACK_HDR_SZ
+	#define STAG_STACK_HDR_SZ sizeof(struct stag_stack)
+#endif
 
 #define STAG_STR(x) (struct stag_string){.str = (x), .len = sizeof((x)) - 1}
+#define STAG_ARRCOUNT(x) ((sizeof((x))) / (sizeof((*x))))
 // #define STAG_REMOVE_PREFIX
 
 #ifdef STAG_STRIP_PREFIX
@@ -174,7 +178,9 @@ struct stag_array_string stag_string_to_array_of_strings(struct stag_string inpu
 
 /*============================================*/
 /*@ALLOCATOR*/
+#ifndef MAX_UINT64
 #define MAX_UINT64 (stag_u64)(-1)
+#endif
 #include <stddef.h>
 
 
@@ -305,7 +311,6 @@ struct stag_stack {
 	stag_u64		checkpoint_offset;
 	stag_byte		*base;
 };
-#define STACK_HEADER_SIZE sizeof(struct stag_stack)
 
 
 
@@ -317,8 +322,8 @@ struct stag_stack *stag_stack_gen(stag_u64 rsrv)
 		rsrv = STC_ALIGN_UP(stag_next_pow2(rsrv), PAGESIZE);
 
 	stag_byte *block = (stag_byte *)stag_os_mem_rsrv(rsrv);
-	stag_byte *stack_ptr_start = (stag_byte *)STC_ALIGN_UP((stag_u64)block + STACK_HEADER_SIZE, PAGESIZE);
-	if (unlikely(stag_os_mem_cmt(block, STACK_HEADER_SIZE) == NULL)) {
+	stag_byte *stack_ptr_start = (stag_byte *)STC_ALIGN_UP((stag_u64)block + STAG_STACK_HDR_SZ, PAGESIZE);
+	if (unlikely(stag_os_mem_cmt(block, STAG_STACK_HDR_SZ) == NULL)) {
 		printf("Failed block header size\n");
 		perror("mprotect");
 	}
@@ -744,6 +749,24 @@ void stag_cmd_array_append(struct stag_cmd_array cmd)
 }
 
 
+struct stag_callback_desc {
+	enum stag_user_commands cmd;
+	stag_cmd_func		func;
+	stag_bool8		immediate;
+};
+
+void stag_register_callback(struct stag_callback_desc desc)
+{
+	stag_ctx.user_data[desc.cmd].fptr = desc.func;
+	stag_ctx.user_data[desc.cmd].immediate_dispatch = desc.immediate;
+}
+
+void stag_register_callback_batch(struct stag_callback_desc *desc, stag_u64 count)
+{
+	for (stag_u64 i = 0; i < count; ++i) {
+		stag_register_callback(desc[i]);
+	}
+}
 
 void stag_register_deferred_args(enum stag_user_commands cmd_id, struct stag_cmd_call *args)
 {
